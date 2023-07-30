@@ -1,33 +1,130 @@
-# LilDB: Tiny embedded key-value database for Go applications
+# JiffyDB: Tiny key-value database
 
-## Supported operations:
-- [x] Create or update a key-value pair in the database: `db.Put(key, value)`
-- [x] Delete a key-value pair: `db.Delete(key)`
-- [x] Get the value for a given key: `db.Get(key)`
-- [x] Iterate over keys in lexicographical order: `db.ForEach(prefix, callback)`
+Read and write operations:
+- [x] Create list
+- [x] Count number of lists
+- [x] Set a list's key-value pair
+- [x] Delete a list's key-value pair
+- [x] Get a list's key-value pair
+- [x] Check if a list includes a given key
+- [x] Walk a list's keys in lexicographical order
+- [ ] Compact datafile (removes deleted key-value pairs)
 
+## Example
 
-## Characteristics
+```go
+// Open the database (and open required lists)
+db := jiffydb.New(".db")
+defer db.Close()
+err := db.ReadWrite(func(r *jiffydb.Reader, w *jiffydb.Writer) error {
+	return w.With(todoList, userList)
+})
+if err != nil {
+	panic(err)
+}
 
-- Append-only (updates and deletes do not erase previous data).
-- Keys are ordered lexicographically in a trie (time complexity O(N) where N is key-length).
-- A "get" operation maps to a single OS file read.
-- A "put" or "delete" operation maps to a single OS file write.
+// Set a key-value pair
+err = db.ReadWrite(func(r *jiffydb.Reader, w *jiffydb.Writer) error {
+	w.In(todoList).Put([]byte("laundry"), []byte("todo"))
+	return nil
+})
+if err != nil {
+	panic(err)
+}
 
-## File format
+// Set multiple key-value pairs
+err = db.ReadWrite(func(r *jiffydb.Reader, w *jiffydb.Writer) error {
+	w.In(todoList).Put([]byte("vacuum room"), []byte("todo"))
+	w.In(todoList).Put([]byte("groceries"), []byte("todo"))
+	w.In(todoList).Put([]byte("laundry"), []byte("done"))
+	return nil
+})
+if err != nil {
+	panic(err)
+}
 
-A data file consists of consecutive rows.
+// Delete a key-value pair
+err = db.ReadWrite(func(r *jiffydb.Reader, w *jiffydb.Writer) error {
+	w.In(todoList).Delete([]byte("vacuum room"))
+	return nil
+})
+if err != nil {
+	panic(err)
+}
 
-Here's what a row looks like:
+// Get a key-value pair
+// Note: key not found returns a nil value and no error.
+var v []byte
+err = db.Read(func(r *jiffydb.Reader) error {
+	v, err = r.In(todoList).Get([]byte("laundry"))
+	return err
+})
+if err != nil {
+	panic(err)
+}
+if v == nil {
+	fmt.Println("not found")
+}
+fmt.Println(v)
+
+// Check if a key exists
+_ = db.Read(func(r *jiffydb.Reader) error {
+	exists := r.In(todoList).Exists([]byte("laundry"))
+	fmt.Println(exists)
+	return nil
+})
+
+// Walk all keys
+_ = db.Read(func(r *jiffydb.Reader) error {
+	return r.In(todoList).Walk([]byte{}, func(key []byte) (bool, error) {
+		fmt.Printf("%q\n", key)
+		return true, nil
+	})
+})
+
+// Walk all key-value pairs
+_ = db.Read(func(r *jiffydb.Reader) error {
+	return r.In(todoList).WalkWithValue([]byte{}, func(key, value []byte) (bool, error) {
+		fmt.Printf("%q = %q\n", key, value)
+		return true, nil
+	})
+})
+
+// Walk all keys with prefix
+_ = db.Read(func(r *jiffydb.Reader) error {
+	return r.In(todoList).Walk([]byte("laun"), func(key []byte) (bool, error) {
+		fmt.Printf("%q\n", key)
+		return true, nil
+	})
+})
+
+// Walk some keys (return false in callback)
+count := 10
+_ = db.Read(func(r *jiffydb.Reader) error {
+	return r.In(todoList).Walk([]byte("2006"), func(key []byte) (bool, error) {
+		if count == 0 {
+			return false, nil
+		}
+		fmt.Printf("%q\n", key)
+		count--
+		return true, nil
+	})
+})
+```
+
+## Internal file encoding
+
+One list has one file.
+
+Put and delete operations are simply appended to file.
+
+Operations are encoded as follows:
 
 ```
-+------------+--------------------+-----------------------+---------+-----------+----+
-| op (uint8) | key-length (uint8) | value-length (uint32) | key ... | value ... | LF |
-+------------+--------------------+-----------------------+---------+-----------+----+
++--------+------------+--------------+-----+-------+
+| Opcode | Key-length | Value-length | Key | Value |
++--------+------------+--------------+-----+-------+
 ```
-
-Notes:
-- Timestamp (big-endian uint64) represents the number of seconds since Unix epoch.
-- Op (single byte character) represents a "put" or "delete" operation.
-- Key-length (uint8) represents the width of the key.
-- Value-length (big-endian uint32) represents the width of the value.
+Opcode: 
+- `'='` for `put` 
+- `'!'` for `delete`
