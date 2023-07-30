@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/ejuju/jiffydb/pkg/jiffy"
+	"github.com/ejuju/jiffy/pkg/jiffy"
 )
 
 const (

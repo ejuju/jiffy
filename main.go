@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ejuju/jiffydb/pkg/jiffy"
+	"github.com/ejuju/jiffy/pkg/jiffy"
 )
 
 func main() {

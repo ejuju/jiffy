@@ -31,7 +31,7 @@ func (db *Database) Close() []error {
 	return errs
 }
 
-const FileExtension = ".jiffydb"
+const FileExtension = ".jiffy"
 
 type datafile struct {
 	fpath   string

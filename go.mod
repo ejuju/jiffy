@@ -1,3 +1,3 @@
-module github.com/ejuju/jiffydb
+module github.com/ejuju/jiffy
 
 go 1.20
