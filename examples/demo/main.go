@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"github.com/ejuju/jiffy/pkg/jiffy"
 )
@@ -59,11 +60,12 @@ func main() {
 	// Iterate over a given key's history of values
 	khistory := c.History()
 	for i := 0; i < khistory.Length(); i++ {
-		v, err = khistory.Version(i)
+		version := khistory.Version(i)
+		v, err := version.Value()
 		if err != nil {
 			panic(err)
 		}
-		log.Println(v)
+		log.Println(version.At.Format(time.RFC3339), v)
 	}
 
 	// Check if a key-value pair exists

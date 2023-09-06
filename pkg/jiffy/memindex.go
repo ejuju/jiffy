@@ -1,6 +1,9 @@
 package jiffy
 
-import "bytes"
+import (
+	"bytes"
+	"time"
+)
 
 type memindex struct {
 	count          int        // number of unique non-deleted keys
@@ -10,9 +13,14 @@ type memindex struct {
 
 type keyInfo struct {
 	key            []byte
-	p              []Position
+	puts           []keyInfoLine
 	previous, next *keyInfo
 	nextInBucket   *keyInfo // internal hashtable bucket state for seperate chaining
+}
+
+type keyInfoLine struct {
+	p  Position
+	at time.Time
 }
 
 type Position [2]int64
@@ -28,14 +36,14 @@ func newMemindex(numBuckets int) *memindex {
 	return &memindex{buckets: make([]*keyInfo, numBuckets)}
 }
 
-func (lht *memindex) put(key []byte, p Position) {
+func (lht *memindex) put(key []byte, at time.Time, p Position) {
 	bucketIndex := lht.hashFNV1a(key)
 	root := lht.buckets[bucketIndex]
 	var prevInBucket *keyInfo
 	for item := root; item != nil; prevInBucket, item = item, item.nextInBucket {
 		if bytes.Equal(item.key, key) {
 			// Append put position and move exisiting item to end of linked-list
-			item.p = append(item.p, p)
+			item.puts = append(item.puts, keyInfoLine{at: at, p: p})
 			if item != lht.latest {
 				if item == lht.oldest {
 					lht.oldest = item.next
@@ -50,7 +58,7 @@ func (lht *memindex) put(key []byte, p Position) {
 
 	// Add new item to bucket and increment count
 	lht.count++
-	newItem := &keyInfo{key: key, p: []Position{p}}
+	newItem := &keyInfo{key: key, puts: []keyInfoLine{{at: at, p: p}}}
 	if prevInBucket == nil {
 		lht.buckets[bucketIndex] = newItem
 	} else {

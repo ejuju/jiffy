@@ -91,7 +91,7 @@ func (f *File) initMemstate() error {
 		case OpDelete:
 			collMemindex.delete(l.Key)
 		case OpPut:
-			collMemindex.put(l.Key, NewPosition(lineStart, lineLength))
+			collMemindex.put(l.Key, l.At, NewPosition(lineStart, lineLength))
 		}
 	}
 	return nil

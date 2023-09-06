@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 func (f *File) Length() int64 { return f.fsize }
@@ -29,16 +30,16 @@ func (f *File) Inside(gid GroupID) *Group {
 }
 
 func (g *Group) Put(key, value []byte) error {
-	offset, length, err := g.f.append(OpPut, g.gid, key, value)
+	offset, length, err := g.f.append(OpPut, g.gid, time.Now(), key, value)
 	if err != nil {
 		return err
 	}
-	g.midx.put(key, NewPosition(offset, length))
+	g.midx.put(key, time.Now(), NewPosition(offset, length))
 	return nil
 }
 
 func (g *Group) Delete(key []byte) error {
-	_, _, err := g.f.append(OpDelete, g.gid, key, nil)
+	_, _, err := g.f.append(OpDelete, g.gid, time.Now(), key, nil)
 	if err != nil {
 		return err
 	}
@@ -46,9 +47,9 @@ func (g *Group) Delete(key []byte) error {
 	return nil
 }
 
-func (f *File) append(opcode Opcode, gid GroupID, slot1, slot2 []byte) (int64, int64, error) {
+func (f *File) append(opcode Opcode, gid GroupID, at time.Time, slot1, slot2 []byte) (int64, int64, error) {
 	startOffset := f.fsize
-	encoded, err := f.ffmt.Encode(Line{Op: opcode, GroupID: gid, Key: slot1, Value: slot2})
+	encoded, err := f.ffmt.Encode(Line{Op: opcode, GroupID: gid, At: at, Key: slot1, Value: slot2})
 	if err != nil {
 		return startOffset, 0, err
 	}
@@ -134,24 +135,37 @@ func (c *Cursor) Key() []byte { return c.current.key }
 // History holds information about previous operations associated with a given key.
 type History struct {
 	f        *File
-	versions []Position
+	versions []keyInfoLine
 }
 
 // History returns the history associated with the current key that the cursor is pointing to.
-func (c *Cursor) History() *History { return &History{f: c.f, versions: c.current.p} }
+func (c *Cursor) History() *History { return &History{f: c.f, versions: c.current.puts} }
 
 // Length returns the number of lines in the history.
 func (h *History) Length() int { return len(h.versions) }
 
-// Version returns a value in the history given its index.
-func (h *History) Version(i int) ([]byte, error) {
-	p := h.versions[i]
-	buf := make([]byte, p.Length())
-	_, err := h.f.r.ReadAt(buf, p.Offset())
+type Version struct {
+	f        *File
+	At       time.Time
+	Position Position
+}
+
+func (h *History) Version(i int) *Version {
+	if len(h.versions) == 0 || i > len(h.versions)-1 {
+		return nil
+	}
+	version := h.versions[i]
+	return &Version{f: h.f, At: version.at, Position: version.p}
+}
+
+// Value reads the value for the current version.
+func (version *Version) Value() ([]byte, error) {
+	buf := make([]byte, version.Position.Length())
+	_, err := version.f.r.ReadAt(buf, version.Position.Offset())
 	if err != nil {
 		return nil, err
 	}
-	_, l, err := h.f.ffmt.Decode(bufio.NewReader(bytes.NewReader(buf)))
+	_, l, err := version.f.ffmt.Decode(bufio.NewReader(bytes.NewReader(buf)))
 	if err != nil {
 		return nil, err
 	}
@@ -159,4 +173,4 @@ func (h *History) Version(i int) ([]byte, error) {
 }
 
 // Value returns the last value in the history.
-func (h *History) Value() ([]byte, error) { return h.Version(h.Length() - 1) }
+func (h *History) Value() ([]byte, error) { return h.Version(h.Length() - 1).Value() }

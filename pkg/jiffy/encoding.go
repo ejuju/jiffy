@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 type FileFormat interface {
@@ -47,11 +48,13 @@ func ValideKeyValueLengths(key, value []byte) error {
 	return nil
 }
 
-const LineHeaderLength = 1 + 1 + 1 + 4 // op (uint8) + group (uint8) + len1 (uint8) + len2 (uint32)
+// op + group + at + klen + vlen
+const binaryFormatHeaderLength = 1 + 1 + 8 + 1 + 4
 
 type Line struct {
 	Op      Opcode
 	GroupID GroupID
+	At      time.Time
 	Key     []byte
 	Value   []byte
 }
@@ -65,9 +68,11 @@ func (bff BinaryFileFormat) Encode(l Line) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	header := [LineHeaderLength]byte{byte(l.Op), byte(l.GroupID), uint8(len(l.Key))} // + op + GID + klen
-	binary.BigEndian.PutUint32(header[3:], uint32(len(l.Value)))                     // + vlen
-	return append(append(header[:], l.Key...), l.Value...), nil                      // + key + value
+	header := [binaryFormatHeaderLength]byte{byte(l.Op), byte(l.GroupID)} // + op + GID
+	bff.ByteOrder.PutUint64(header[2:], uint64(l.At.UnixNano()))          // + timestamp
+	header[10] = uint8(len(l.Key))                                        // + klen
+	bff.ByteOrder.PutUint32(header[11:], uint32(len(l.Value)))            // + vlen
+	return append(append(header[:], l.Key...), l.Value...), nil           // + key + value
 }
 
 func (bff BinaryFileFormat) Decode(r *bufio.Reader) (int64, Line, error) {
@@ -75,14 +80,15 @@ func (bff BinaryFileFormat) Decode(r *bufio.Reader) (int64, Line, error) {
 	l := Line{}
 
 	// Read header and end of line (only 2 reads needed)
-	header := [LineHeaderLength]byte{}
+	header := [binaryFormatHeaderLength]byte{}
 	n, err := io.ReadFull(r, header[:])
 	read += int64(n)
 	if err != nil {
 		return read, l, fmt.Errorf("read header: %w", err)
 	}
 	l.Op, l.GroupID = Opcode(header[0]), GroupID(header[1])
-	klen, vlen := uint8(header[2]), binary.BigEndian.Uint32(header[3:])
+	l.At = time.Unix(0, int64(bff.ByteOrder.Uint64(header[2:])))
+	klen, vlen := uint8(header[10]), bff.ByteOrder.Uint32(header[11:])
 
 	// Read till end of line (key + value)
 	slotsLength := int(klen) + int(vlen)
@@ -106,19 +112,21 @@ func (bff BinaryFileFormat) Decode(r *bufio.Reader) (int64, Line, error) {
 }
 
 type TextFileFormat struct {
-	Base              int
-	CharSuffixOp      byte
-	CharSuffixGroupID byte
-	CharSuffixKey     byte
-	CharSuffixValue   byte
+	Base                int
+	CharSuffixOp        byte
+	CharSuffixGroupID   byte
+	CharSuffixTimestamp byte
+	CharSuffixKey       byte
+	CharSuffixValue     byte
 }
 
 var DefaultTextFileFormat = TextFileFormat{
-	Base:              10,
-	CharSuffixOp:      ' ',
-	CharSuffixGroupID: ' ',
-	CharSuffixKey:     ' ',
-	CharSuffixValue:   '\n',
+	Base:                10,
+	CharSuffixOp:        ' ',
+	CharSuffixGroupID:   ' ',
+	CharSuffixTimestamp: ' ',
+	CharSuffixKey:       ' ',
+	CharSuffixValue:     '\n',
 }
 
 func (tff TextFileFormat) Encode(l Line) ([]byte, error) {
@@ -139,6 +147,8 @@ func (tff TextFileFormat) Encode(l Line) ([]byte, error) {
 		return nil, fmt.Errorf("value contains sentinel suffix %q at index %d", tff.CharSuffixValue, i)
 	}
 	b := []byte{byte(l.Op), tff.CharSuffixOp, byte(l.GroupID), tff.CharSuffixGroupID} // + op-suffix + group-suffix
+	b = append(b, l.At.Format(time.RFC3339)...)                                       // + timestamp
+	b = append(b, tff.CharSuffixTimestamp)                                            // + timestamp-suffix
 	b = append(b, l.Key...)                                                           // + key
 	b = append(b, tff.CharSuffixKey)                                                  // + key-suffix
 	b = append(b, l.Value...)                                                         // + value
@@ -165,6 +175,17 @@ func (tff TextFileFormat) Decode(r *bufio.Reader) (int64, Line, error) {
 		return read, l, fmt.Errorf("read group ID: %w", err)
 	}
 	l.GroupID = GroupID(gidAndSuffix[0])
+
+	// Read timestamp
+	tsAndSuffix, err := r.ReadBytes(tff.CharSuffixTimestamp)
+	read += int64(len(tsAndSuffix))
+	if err != nil {
+		return read, l, fmt.Errorf("read timestamp: %w", err)
+	}
+	l.At, err = time.Parse(time.RFC3339, string(tsAndSuffix[:len(tsAndSuffix)-1]))
+	if err != nil {
+		return read, l, fmt.Errorf("parse timestamp: %w", err)
+	}
 
 	// Read key
 	keyAndSuffix, err := r.ReadBytes(tff.CharSuffixKey)
