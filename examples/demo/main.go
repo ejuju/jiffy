@@ -6,21 +6,36 @@ import (
 	"github.com/ejuju/jiffy/pkg/jiffy"
 )
 
+const (
+	_ jiffy.GroupID = iota
+	userGroupID
+	contactGroupID
+)
+
 func main() {
-	f, err := jiffy.Open("main.lf", 0)
+	key1 := []byte{007}
+	value1 := []byte("James Bond")
+
+	f, err := jiffy.Open("db.lf", map[jiffy.GroupID]int{
+		userGroupID:    0,
+		contactGroupID: 0,
+	})
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
 
-	// Put a key-value pair in the database
-	err = f.Put([]byte{123}, []byte("something"))
+	// Scope operations to a certain group (= "table" or "collection")
+	users := f.Inside(userGroupID)
+
+	// Put a key-value pair in the database.
+	err = users.Put(key1, value1)
 	if err != nil {
 		panic(err)
 	}
 
-	// Delete a key-value pair in the database
-	err = f.Delete([]byte{123})
+	// Delete a key-value pair from the database.
+	err = f.Inside(userGroupID).Delete([]byte{123})
 	if err != nil {
 		panic(err)
 	}
@@ -32,11 +47,11 @@ func main() {
 	}
 
 	// Lookup a key
-	c := f.Seek([]byte{1})
+	c := users.Seek(key1)
 	if c == nil {
 		log.Println("key not found")
 	}
-	v, err := f.Seek([]byte{1}).History().Value()
+	v, err := c.History().Value()
 	if err != nil {
 		panic(err)
 	}
@@ -53,26 +68,30 @@ func main() {
 	}
 
 	// Check if a key-value pair exists
-	if f.Seek([]byte{1}) != nil {
+	if users.Seek(key1) != nil {
 		log.Println("already exists")
 	}
 
 	// Count unique non-delete keys
-	count := f.Count()
+	count := users.Count()
 	log.Println(count)
 
 	// Iterate over keys in chronological order
-	for c := f.Oldest(); c != nil; c = c.Next() {
+	for c := users.Oldest(); c != nil; c = c.Next() {
 		log.Println(c.Key())
 	}
 
 	// Iterate over keys in reverse chronological order
-	for c := f.Latest(); c != nil; c = c.Previous() {
+	for c := users.Latest(); c != nil; c = c.Previous() {
 		log.Println(c.Key())
 	}
 
-	// Iterate over keys put after a given key
-	for c := f.Seek([]byte{123}); c != nil; c = c.Next() {
+	// Iterate over keys created or updated after a given key
+	for c := users.Seek(key1); c != nil; c = c.Next() {
 		log.Println(c.Key())
 	}
+}
+
+func init() {
+	log.SetFlags(log.Lshortfile)
 }

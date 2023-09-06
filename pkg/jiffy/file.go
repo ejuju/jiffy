@@ -9,15 +9,15 @@ import (
 
 // File holds the in-memory state of a linefile and wraps operations on the underlying file.
 type File struct {
-	fpath      string    // Underlying file's path
-	numBuckets int       // Number of hashtable buckets (seperate chaining)
-	midx       *memindex // Ordered-mapping of key to the line in the file
-	fsize      int64     // Current file size (= write offset)
-	r, w       *os.File  // OS file handlers (for reads and writes)
+	fpath      string          // Underlying file's path
+	fsize      int64           // Current file size (= write offset)
+	r, w       *os.File        // OS file handlers (for reads and writes)
+	memidxs    [256]*memindex  // Collections (= ordered-maps of key-value pairs)
+	numBuckets map[GroupID]int // Collections' number of hashtable buckets (seperate chaining)
 }
 
 // Open opens a file and scans it to restore the memstate.
-func Open(fpath string, numBuckets int) (*File, error) {
+func Open(fpath string, numBuckets map[GroupID]int) (*File, error) {
 	f := &File{fpath: fpath, numBuckets: numBuckets}
 	err := f.initMemstate()
 	if err != nil {
@@ -54,7 +54,10 @@ func (f *File) initMemstate() error {
 	}
 
 	// Rebuild memstate
-	f.midx = newMemindex(f.numBuckets)
+	f.memidxs = [256]*memindex{}
+	for cID, cNumBuckets := range f.numBuckets {
+		f.memidxs[cID] = newMemindex(cNumBuckets)
+	}
 	f.fsize = 0
 	for {
 		l := Line{}
@@ -63,21 +66,24 @@ func (f *File) initMemstate() error {
 		f.fsize += lineLength
 		if errors.Is(err, io.EOF) {
 			if lineLength > 0 {
-				f.mustTruncateTailCorruption(lineStart) // We reached EOF in the middle of a row.
+				f.mustTruncateTailCorruption(lineStart) // We reached EOF on a corrupted row.
 			}
 			break // We reached the end of the file, all good!
 		}
 		if err != nil {
 			return fmt.Errorf("read row at offset %d: %w", lineStart, err)
 		}
-
+		collMemindex := f.memidxs[l.GroupID]
+		if collMemindex == nil {
+			return fmt.Errorf("collection ID %d not found in memstate", l.GroupID)
+		}
 		switch l.Op {
 		default:
 			return fmt.Errorf("illegal op %q at offset %d", l.Op, lineStart)
 		case OpDelete:
-			f.midx.delete(l.Key)
+			collMemindex.delete(l.Key)
 		case OpPut:
-			f.midx.put(l.Key, NewPosition(lineStart, lineLength))
+			collMemindex.put(l.Key, NewPosition(lineStart, lineLength))
 		}
 	}
 	return nil
