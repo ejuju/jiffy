@@ -20,6 +20,7 @@ type Opcode uint8
 const (
 	OpPut    Opcode = '+' // create or update a key-value pair
 	OpDelete Opcode = '-' // delete and remove from history, erase at next merge
+	OpCommit Opcode = '.' // mark the end of a transaction
 )
 
 type GroupID byte

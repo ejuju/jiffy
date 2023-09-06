@@ -9,71 +9,34 @@ import (
 	"time"
 )
 
-func (f *File) Length() int64 { return f.fsize }
+type Reader struct{ f *File }
 
-func (f *File) Path() string { return f.fpath }
+func (f *File) Read(do func(r *Reader) error) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	r := &Reader{f: f}
+	return do(r)
+}
 
-func (f *File) Sync() error { return f.w.Sync() }
+func (r *Reader) Length() int64 { return r.f.fsize }
 
-type Group struct {
+func (r *Reader) Path() string { return r.f.fpath }
+
+type GroupReader struct {
 	f    *File
 	gid  GroupID
 	midx *memindex
 }
 
-func (f *File) Inside(gid GroupID) *Group {
-	gmemidx := f.memidxs[gid]
+func (r *Reader) Inside(gid GroupID) *GroupReader {
+	gmemidx := r.f.memidxs[gid]
 	if gmemidx == nil {
 		return nil
 	}
-	return &Group{f: f, gid: gid, midx: gmemidx}
+	return &GroupReader{f: r.f, gid: gid, midx: gmemidx}
 }
 
-func (g *Group) Put(key, value []byte) error {
-	offset, length, err := g.f.append(OpPut, g.gid, time.Now(), key, value)
-	if err != nil {
-		return err
-	}
-	g.midx.put(key, time.Now(), NewPosition(offset, length))
-	return nil
-}
-
-func (g *Group) Delete(key []byte) error {
-	_, _, err := g.f.append(OpDelete, g.gid, time.Now(), key, nil)
-	if err != nil {
-		return err
-	}
-	g.midx.delete(key)
-	return nil
-}
-
-func (f *File) append(opcode Opcode, gid GroupID, at time.Time, slot1, slot2 []byte) (int64, int64, error) {
-	startOffset := f.fsize
-	encoded, err := f.ffmt.Encode(Line{Op: opcode, GroupID: gid, At: at, Key: slot1, Value: slot2})
-	if err != nil {
-		return startOffset, 0, err
-	}
-	n, err := f.w.WriteAt(encoded, int64(f.fsize))
-	f.fsize += int64(n)
-	if err != nil {
-		if errors.Is(err, io.ErrShortWrite) {
-			f.mustTruncateTailCorruption(startOffset)
-		}
-		return startOffset, int64(n), fmt.Errorf("write new line: %w", err)
-	}
-	return startOffset, int64(n), nil
-}
-
-func (f *File) mustTruncateTailCorruption(truncateAt int64) {
-	err := f.w.Truncate(truncateAt)
-	if err != nil {
-		panic(fmt.Errorf("file tail corruption at offset %d: %w", truncateAt, err))
-	}
-	f.fsize = truncateAt
-	f.initMemstate()
-}
-
-func (c *Group) Count() int { return c.midx.count }
+func (c *GroupReader) Count() int { return c.midx.count }
 
 // Cursor represents a pointer to a specific key within the linefile.
 type Cursor struct {
@@ -84,7 +47,7 @@ type Cursor struct {
 
 // Seek looks up a key in the memindex.
 // If the key is not found, a nil value is returned.
-func (g *Group) Seek(key []byte) *Cursor {
+func (g *GroupReader) Seek(key []byte) *Cursor {
 	if kinfo := g.midx.get(key); kinfo != nil {
 		return &Cursor{f: g.f, midx: g.midx, current: kinfo}
 	}
@@ -93,7 +56,7 @@ func (g *Group) Seek(key []byte) *Cursor {
 
 // Oldest returns a cursor pointing to the least recently put key in the linefile.
 // If the linefile is empty, a nil value is returned.
-func (g *Group) Oldest() *Cursor {
+func (g *GroupReader) Oldest() *Cursor {
 	if kinfo := g.midx.oldest; kinfo != nil {
 		return &Cursor{f: g.f, midx: g.midx, current: kinfo}
 	}
@@ -102,7 +65,7 @@ func (g *Group) Oldest() *Cursor {
 
 // Latest returns the most recently put key in the database.
 // If the linefile is empty, a nil value is returned.
-func (g *Group) Latest() *Cursor {
+func (g *GroupReader) Latest() *Cursor {
 	if kinfo := g.midx.latest; kinfo != nil {
 		return &Cursor{f: g.f, midx: g.midx, current: kinfo}
 	}
@@ -174,3 +137,81 @@ func (version *Version) Value() ([]byte, error) {
 
 // Value returns the last value in the history.
 func (h *History) Value() ([]byte, error) { return h.Version(h.Length() - 1).Value() }
+
+type Writer struct{ f *File }
+
+func (f *File) ReadWrite(do func(r *Reader, w *Writer) error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	r, w := &Reader{f: f}, &Writer{f: f}
+	err := do(r, w)
+	if err != nil {
+		return fmt.Errorf("exec read-write transaction: %w", err)
+	}
+
+	err = w.f.w.Sync()
+	if err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+
+	return nil
+}
+
+func (w *Writer) Into(gid GroupID) *GroupWriter {
+	gmemidx := w.f.memidxs[gid]
+	if gmemidx == nil {
+		return nil
+	}
+	return &GroupWriter{f: w.f, gid: gid, midx: gmemidx}
+}
+
+type GroupWriter struct {
+	f    *File
+	gid  GroupID
+	midx *memindex
+}
+
+func (g *GroupWriter) Put(key, value []byte) error {
+	offset, length, err := g.f.append(OpPut, g.gid, time.Now(), key, value)
+	if err != nil {
+		return err
+	}
+	g.midx.put(key, time.Now(), NewPosition(offset, length))
+	return nil
+}
+
+func (g *GroupWriter) Delete(key []byte) error {
+	_, _, err := g.f.append(OpDelete, g.gid, time.Now(), key, nil)
+	if err != nil {
+		return err
+	}
+	g.midx.delete(key)
+	return nil
+}
+
+func (f *File) append(opcode Opcode, gid GroupID, at time.Time, slot1, slot2 []byte) (int64, int64, error) {
+	startOffset := f.fsize
+	encoded, err := f.ffmt.Encode(Line{Op: opcode, GroupID: gid, At: at, Key: slot1, Value: slot2})
+	if err != nil {
+		return startOffset, 0, err
+	}
+	n, err := f.w.WriteAt(encoded, int64(f.fsize))
+	f.fsize += int64(n)
+	if err != nil {
+		if errors.Is(err, io.ErrShortWrite) {
+			f.mustTruncateTailCorruption(startOffset)
+		}
+		return startOffset, int64(n), fmt.Errorf("write new line: %w", err)
+	}
+	return startOffset, int64(n), nil
+}
+
+func (f *File) mustTruncateTailCorruption(truncateAt int64) {
+	err := f.w.Truncate(truncateAt)
+	if err != nil {
+		panic(fmt.Errorf("file tail corruption at offset %d: %w", truncateAt, err))
+	}
+	f.fsize = truncateAt
+	f.initMemstate()
+}

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 // File holds the in-memory state of a linefile and wraps operations on the underlying file.
 type File struct {
+	mu         sync.RWMutex
 	fpath      string          // Underlying file's path
 	fsize      int64           // Current file size (= write offset)
 	ffmt       FileFormat      // File encoding format
@@ -92,6 +94,8 @@ func (f *File) initMemstate() error {
 			collMemindex.delete(l.Key)
 		case OpPut:
 			collMemindex.put(l.Key, l.At, NewPosition(lineStart, lineLength))
+		case OpCommit:
+			panic("todo")
 		}
 	}
 	return nil
