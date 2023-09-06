@@ -70,33 +70,51 @@ func (f *File) initMemstate() error {
 	}
 	f.fsize = 0
 	bufr := bufio.NewReader(f.r)
+	truncateAt := int64(0)
+	var txLines []txReplayLine
 	for {
 		lineStart := f.fsize
 		lineLength, l, err := f.ffmt.Decode(bufr)
 		f.fsize += lineLength
 		if errors.Is(err, io.EOF) {
 			if lineLength > 0 {
-				f.mustTruncateTailCorruption(lineStart) // We reached EOF on a corrupted row.
+				f.mustTruncateTailCorruption(truncateAt) // We reached EOF on a corrupted row.
 			}
 			break // We reached the end of the file, all good!
 		}
 		if err != nil {
 			return fmt.Errorf("read row at offset %d: %w", lineStart, err)
 		}
-		collMemindex := f.memidxs[l.GroupID]
-		if collMemindex == nil {
-			return fmt.Errorf("collection ID %d not found in memstate", l.GroupID)
-		}
 		switch l.Op {
 		default:
 			return fmt.Errorf("illegal op %q at offset %d", l.Op, lineStart)
-		case OpDelete:
-			collMemindex.delete(l.Key)
-		case OpPut:
-			collMemindex.put(l.Key, l.At, NewPosition(lineStart, lineLength))
+		case OpDelete, OpPut:
+			txLines = append(txLines, txReplayLine{p: NewPosition(lineStart, lineLength), l: l})
 		case OpCommit:
-			panic("todo")
+			for _, txLine := range txLines {
+				collMemindex := f.memidxs[txLine.l.GroupID]
+				if collMemindex == nil {
+					return fmt.Errorf("collection ID %d not found in memstate", txLine.l.GroupID)
+				}
+				switch txLine.l.Op {
+				case OpPut:
+					collMemindex.put(txLine.l.Key, txLine.l.At, txLine.p)
+				case OpDelete:
+					collMemindex.delete(txLine.l.Key)
+				}
+			}
+			txLines = nil
+			truncateAt = f.fsize
 		}
 	}
+	if len(txLines) > 0 {
+		f.mustTruncateTailCorruption(truncateAt)
+	}
+
 	return nil
+}
+
+type txReplayLine struct {
+	p Position
+	l Line
 }

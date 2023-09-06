@@ -4,7 +4,6 @@
 
 ## Roadmap
 
-- [ ] Support transactions
 - [ ] Support compaction
 - [ ] ACID-compliance tests
 - [ ] Detect and remedy file corruption

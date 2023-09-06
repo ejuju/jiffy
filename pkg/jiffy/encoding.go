@@ -54,8 +54,8 @@ const binaryFormatHeaderLength = 1 + 1 + 8 + 1 + 4
 
 type Line struct {
 	Op      Opcode
-	GroupID GroupID
 	At      time.Time
+	GroupID GroupID
 	Key     []byte
 	Value   []byte
 }

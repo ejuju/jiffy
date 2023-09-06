@@ -3,9 +3,7 @@ package jiffy
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"time"
 )
 
@@ -28,7 +26,7 @@ type GroupReader struct {
 	midx *memindex
 }
 
-func (r *Reader) Inside(gid GroupID) *GroupReader {
+func (r *Reader) In(gid GroupID) *GroupReader {
 	gmemidx := r.f.memidxs[gid]
 	if gmemidx == nil {
 		return nil
@@ -138,73 +136,98 @@ func (version *Version) Value() ([]byte, error) {
 // Value returns the last value in the history.
 func (h *History) Value() ([]byte, error) { return h.Version(h.Length() - 1).Value() }
 
-type Writer struct{ f *File }
+type Writer struct {
+	f     *File
+	lines []Line
+}
 
 func (f *File) ReadWrite(do func(r *Reader, w *Writer) error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// Execute callback, if the callback returns an error, the transaction is aborted.
 	r, w := &Reader{f: f}, &Writer{f: f}
 	err := do(r, w)
 	if err != nil {
 		return fmt.Errorf("exec read-write transaction: %w", err)
 	}
 
-	err = w.f.w.Sync()
+	// Encode all lines in a temporary buffer
+	buf := []byte{}
+	positions := make([]Position, 0, len(w.lines))
+	for _, l := range w.lines {
+		if f.memidxs[l.GroupID] == nil {
+			return fmt.Errorf("group with ID %d not found", l.GroupID)
+		}
+		bufOffset := len(buf)
+		encoded, err := f.ffmt.Encode(l)
+		if err != nil {
+			return err
+		}
+		positions = append(positions, NewPosition(int64(bufOffset), int64(len(encoded))))
+		buf = append(buf, encoded...)
+	}
+
+	// Append commit line to buffer
+	commitLine, err := f.ffmt.Encode(Line{Op: OpCommit, At: time.Now(), GroupID: GroupID(OpCommit)})
+	if err != nil {
+		return err
+	}
+	buf = append(buf, commitLine...)
+
+	// Write buffer to file
+	startOffset := f.fsize
+	n, err := f.w.Write(buf)
+	f.fsize += int64(n)
+	if err != nil {
+		if n > 0 {
+			f.mustTruncateTailCorruption(startOffset)
+		}
+		return fmt.Errorf("write transaction buffer: %w", err)
+	}
+
+	// Ensure file changes are persisted to disk
+	err = f.w.Sync()
 	if err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
 
+	// Update memstate
+	for i, l := range w.lines {
+		gmidx := f.memidxs[l.GroupID] // nil check is performed during the buffer encoding
+		switch l.Op {
+		default:
+			panic("unreachable")
+		case OpPut:
+			gmidx.put(l.Key, l.At, positions[i])
+		case OpDelete:
+			gmidx.delete(l.Key)
+		}
+	}
+
 	return nil
 }
 
-func (w *Writer) Into(gid GroupID) *GroupWriter {
+func (w *Writer) In(gid GroupID) *GroupWriter {
 	gmemidx := w.f.memidxs[gid]
 	if gmemidx == nil {
 		return nil
 	}
-	return &GroupWriter{f: w.f, gid: gid, midx: gmemidx}
+	return &GroupWriter{w: w, gid: gid, midx: gmemidx}
 }
 
 type GroupWriter struct {
-	f    *File
+	w    *Writer
 	gid  GroupID
 	midx *memindex
 }
 
-func (g *GroupWriter) Put(key, value []byte) error {
-	offset, length, err := g.f.append(OpPut, g.gid, time.Now(), key, value)
-	if err != nil {
-		return err
-	}
-	g.midx.put(key, time.Now(), NewPosition(offset, length))
-	return nil
+func (g *GroupWriter) Put(key, value []byte) {
+	g.w.lines = append(g.w.lines, Line{Op: OpPut, At: time.Now(), GroupID: g.gid, Key: key, Value: value})
 }
 
-func (g *GroupWriter) Delete(key []byte) error {
-	_, _, err := g.f.append(OpDelete, g.gid, time.Now(), key, nil)
-	if err != nil {
-		return err
-	}
-	g.midx.delete(key)
-	return nil
-}
-
-func (f *File) append(opcode Opcode, gid GroupID, at time.Time, slot1, slot2 []byte) (int64, int64, error) {
-	startOffset := f.fsize
-	encoded, err := f.ffmt.Encode(Line{Op: opcode, GroupID: gid, At: at, Key: slot1, Value: slot2})
-	if err != nil {
-		return startOffset, 0, err
-	}
-	n, err := f.w.WriteAt(encoded, int64(f.fsize))
-	f.fsize += int64(n)
-	if err != nil {
-		if errors.Is(err, io.ErrShortWrite) {
-			f.mustTruncateTailCorruption(startOffset)
-		}
-		return startOffset, int64(n), fmt.Errorf("write new line: %w", err)
-	}
-	return startOffset, int64(n), nil
+func (g *GroupWriter) Delete(key []byte) {
+	g.w.lines = append(g.w.lines, Line{Op: OpDelete, At: time.Now(), GroupID: g.gid, Key: key})
 }
 
 func (f *File) mustTruncateTailCorruption(truncateAt int64) {
