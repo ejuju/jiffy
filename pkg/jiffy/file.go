@@ -1,6 +1,7 @@
 package jiffy
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -11,14 +12,21 @@ import (
 type File struct {
 	fpath      string          // Underlying file's path
 	fsize      int64           // Current file size (= write offset)
+	ffmt       FileFormat      // File encoding format
 	r, w       *os.File        // OS file handlers (for reads and writes)
 	memidxs    [256]*memindex  // Collections (= ordered-maps of key-value pairs)
 	numBuckets map[GroupID]int // Collections' number of hashtable buckets (seperate chaining)
 }
 
 // Open opens a file and scans it to restore the memstate.
-func Open(fpath string, numBuckets map[GroupID]int) (*File, error) {
-	f := &File{fpath: fpath, numBuckets: numBuckets}
+func Open(fpath string, ffmt FileFormat, numBuckets map[GroupID]int) (*File, error) {
+	if fpath == "" {
+		return nil, errors.New("missing file path")
+	}
+	if ffmt == nil {
+		ffmt = DefaultTextFileFormat
+	}
+	f := &File{fpath: fpath, ffmt: ffmt, numBuckets: numBuckets}
 	err := f.initMemstate()
 	if err != nil {
 		return nil, err
@@ -59,10 +67,10 @@ func (f *File) initMemstate() error {
 		f.memidxs[cID] = newMemindex(cNumBuckets)
 	}
 	f.fsize = 0
+	bufr := bufio.NewReader(f.r)
 	for {
-		l := Line{}
 		lineStart := f.fsize
-		lineLength, err := l.ReadFrom(f.r)
+		lineLength, l, err := f.ffmt.Decode(bufr)
 		f.fsize += lineLength
 		if errors.Is(err, io.EOF) {
 			if lineLength > 0 {

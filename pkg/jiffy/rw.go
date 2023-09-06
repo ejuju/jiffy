@@ -1,11 +1,11 @@
 package jiffy
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 )
 
 func (f *File) Length() int64 { return f.fsize }
@@ -48,7 +48,7 @@ func (g *Group) Delete(key []byte) error {
 
 func (f *File) append(opcode Opcode, gid GroupID, slot1, slot2 []byte) (int64, int64, error) {
 	startOffset := f.fsize
-	encoded, err := Line{Op: opcode, GroupID: gid, Key: slot1, Value: slot2}.MarshalBinary()
+	encoded, err := f.ffmt.Encode(Line{Op: opcode, GroupID: gid, Key: slot1, Value: slot2})
 	if err != nil {
 		return startOffset, 0, err
 	}
@@ -64,7 +64,6 @@ func (f *File) append(opcode Opcode, gid GroupID, slot1, slot2 []byte) (int64, i
 }
 
 func (f *File) mustTruncateTailCorruption(truncateAt int64) {
-	log.Println("truncating tail corruption")
 	err := f.w.Truncate(truncateAt)
 	if err != nil {
 		panic(fmt.Errorf("file tail corruption at offset %d: %w", truncateAt, err))
@@ -152,8 +151,7 @@ func (h *History) Version(i int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := Line{}
-	_, err = l.ReadFrom(bytes.NewReader(buf))
+	_, l, err := h.f.ffmt.Decode(bufio.NewReader(bytes.NewReader(buf)))
 	if err != nil {
 		return nil, err
 	}

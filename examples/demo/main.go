@@ -7,16 +7,15 @@ import (
 )
 
 const (
-	_ jiffy.GroupID = iota
-	userGroupID
-	contactGroupID
+	userGroupID    = jiffy.GroupID('u')
+	contactGroupID = jiffy.GroupID('c')
 )
 
 func main() {
-	key1 := []byte{007}
+	key1 := []byte("007")
 	value1 := []byte("James Bond")
 
-	f, err := jiffy.Open("db.lf", map[jiffy.GroupID]int{
+	f, err := jiffy.Open("db.lf", nil, map[jiffy.GroupID]int{
 		userGroupID:    0,
 		contactGroupID: 0,
 	})
@@ -35,7 +34,7 @@ func main() {
 	}
 
 	// Delete a key-value pair from the database.
-	err = f.Inside(userGroupID).Delete([]byte{123})
+	err = users.Delete([]byte("006"))
 	if err != nil {
 		panic(err)
 	}
